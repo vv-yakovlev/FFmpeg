@@ -434,9 +434,15 @@ InputStream *ist_iter(InputStream *prev)
 FrameData *frame_data(AVFrame *frame)
 {
     if (!frame->opaque_ref) {
-        frame->opaque_ref = av_buffer_allocz(sizeof(FrameData));
+        FrameData *fd;
+
+        frame->opaque_ref = av_buffer_allocz(sizeof(*fd));
         if (!frame->opaque_ref)
             return NULL;
+        fd = (FrameData*)frame->opaque_ref->data;
+
+        fd->dec.frame_num = UINT64_MAX;
+        fd->dec.pts       = AV_NOPTS_VALUE;
     }
 
     return (FrameData*)frame->opaque_ref->data;
@@ -839,7 +845,9 @@ static int process_input_packet(InputStream *ist, const AVPacket *pkt, int no_eo
             continue;
         }
 
-        of_streamcopy(ost, pkt, dts_est);
+        ret = of_streamcopy(ost, pkt, dts_est);
+        if (ret < 0)
+            return ret;
     }
 
     return !eof_reached;
@@ -941,10 +949,6 @@ static int choose_output(OutputStream **post)
         } else {
             opts = ost->last_mux_dts == AV_NOPTS_VALUE ?
                    INT64_MIN : ost->last_mux_dts;
-            if (ost->last_mux_dts == AV_NOPTS_VALUE)
-                av_log(ost, AV_LOG_DEBUG,
-                    "cur_dts is invalid [init:%d i_done:%d finish:%d] (this is harmless if it occurs once at the start per stream)\n",
-                    ost->initialized, ost->inputs_done, ost->finished);
         }
 
         if (!ost->initialized && !ost->inputs_done && !ost->finished) {
@@ -1098,7 +1102,7 @@ static int process_input(int file_index)
             av_log(ifile, AV_LOG_ERROR,
                    "Error retrieving a packet from demuxer: %s\n", av_err2str(ret));
             if (exit_on_error)
-                exit_program(1);
+                return ret;
         }
 
         for (i = 0; i < ifile->nb_streams; i++) {
@@ -1107,6 +1111,8 @@ static int process_input(int file_index)
                 ret = process_input_packet(ist, NULL, 0);
                 if (ret>0)
                     return 0;
+                else if (ret < 0)
+                    return ret;
             }
 
             /* mark all outputs that don't go through lavfi as finished */
@@ -1128,11 +1134,11 @@ static int process_input(int file_index)
 
     sub2video_heartbeat(ifile, pkt->pts, pkt->time_base);
 
-    process_input_packet(ist, pkt, 0);
+    ret = process_input_packet(ist, pkt, 0);
 
     av_packet_free(&pkt);
 
-    return 0;
+    return ret < 0 ? ret : 0;
 }
 
 /**
@@ -1223,7 +1229,8 @@ static int transcode(int *err_rate_exceeded)
         float err_rate;
 
         if (!input_files[ist->file_index]->eof_reached) {
-            process_input_packet(ist, NULL, 0);
+            int err = process_input_packet(ist, NULL, 0);
+            ret = err_merge(ret, err);
         }
 
         err_rate = (ist->frames_decoded || ist->decode_errors) ?
