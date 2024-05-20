@@ -20,9 +20,11 @@
 
 #include "libavutil/avassert.h"
 #include "libavutil/common.h"
+#include "libavutil/mem.h"
 #include "libavutil/pixdesc.h"
 
 #include "avcodec.h"
+#include "codec_desc.h"
 #include "decode.h"
 #include "internal.h"
 #include "vaapi_decode.h"
@@ -71,17 +73,14 @@ int ff_vaapi_decode_make_slice_buffer(AVCodecContext *avctx,
 
     av_assert0(pic->nb_slices <= pic->slices_allocated);
     if (pic->nb_slices == pic->slices_allocated) {
-        if (pic->slices_allocated > 0)
-            pic->slices_allocated *= 2;
-        else
-            pic->slices_allocated = 64;
-
         pic->slice_buffers =
             av_realloc_array(pic->slice_buffers,
-                             pic->slices_allocated,
+                             pic->slices_allocated ? pic->slices_allocated * 2 : 64,
                              2 * sizeof(*pic->slice_buffers));
         if (!pic->slice_buffers)
             return AVERROR(ENOMEM);
+
+        pic->slices_allocated = pic->slices_allocated ? pic->slices_allocated * 2 : 64;
     }
     av_assert0(pic->nb_slices + 1 <= pic->slices_allocated);
 
@@ -390,7 +389,7 @@ static const struct {
     VAProfile va_profile;
     VAProfile (*profile_parser)(AVCodecContext *avctx);
 } vaapi_profile_map[] = {
-#define MAP(c, p, v, ...) { AV_CODEC_ID_ ## c, FF_PROFILE_ ## p, VAProfile ## v, __VA_ARGS__ }
+#define MAP(c, p, v, ...) { AV_CODEC_ID_ ## c, AV_PROFILE_ ## p, VAProfile ## v, __VA_ARGS__ }
     MAP(MPEG2VIDEO,  MPEG2_SIMPLE,    MPEG2Simple ),
     MAP(MPEG2VIDEO,  MPEG2_MAIN,      MPEG2Main   ),
     MAP(H263,        UNKNOWN,         H263Baseline),
@@ -497,7 +496,7 @@ static int vaapi_decode_make_config(AVCodecContext *avctx,
         if (avctx->codec_id != vaapi_profile_map[i].codec_id)
             continue;
         if (avctx->profile == vaapi_profile_map[i].codec_profile ||
-            vaapi_profile_map[i].codec_profile == FF_PROFILE_UNKNOWN)
+            vaapi_profile_map[i].codec_profile == AV_PROFILE_UNKNOWN)
             profile_match = 1;
 
         va_profile = vaapi_profile_map[i].profile_parser ?
@@ -600,22 +599,26 @@ static int vaapi_decode_make_config(AVCodecContext *avctx,
         if (err < 0)
             goto fail;
 
-        frames->initial_pool_size = 1;
-        // Add per-codec number of surfaces used for storing reference frames.
-        switch (avctx->codec_id) {
-        case AV_CODEC_ID_H264:
-        case AV_CODEC_ID_HEVC:
-        case AV_CODEC_ID_AV1:
-            frames->initial_pool_size += 16;
-            break;
-        case AV_CODEC_ID_VP9:
-            frames->initial_pool_size += 8;
-            break;
-        case AV_CODEC_ID_VP8:
-            frames->initial_pool_size += 3;
-            break;
-        default:
-            frames->initial_pool_size += 2;
+        if (CONFIG_VAAPI_1)
+            frames->initial_pool_size = 0;
+        else {
+            frames->initial_pool_size = 1;
+            // Add per-codec number of surfaces used for storing reference frames.
+            switch (avctx->codec_id) {
+            case AV_CODEC_ID_H264:
+            case AV_CODEC_ID_HEVC:
+            case AV_CODEC_ID_AV1:
+                frames->initial_pool_size += 16;
+                break;
+            case AV_CODEC_ID_VP9:
+                frames->initial_pool_size += 8;
+                break;
+            case AV_CODEC_ID_VP8:
+                frames->initial_pool_size += 3;
+                break;
+            default:
+                frames->initial_pool_size += 2;
+            }
         }
     }
 
